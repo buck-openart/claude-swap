@@ -606,6 +606,7 @@ Examples:
   cswap auto --threshold 80        # switch earlier
   cswap auto --model Fable         # also switch when the Fable weekly limit is hit
   cswap auto --fallback-account enterprise  # force this account once all are exhausted
+  cswap auto --strategy priority --priority-accounts enterprise,max  # prefer enterprise, recall to it when it recovers
   cswap auto --json                # one JSON event per line (for scripts)
   cswap auto --once; echo $?       # single tick, outcome in exit code
   cswap auto --dry-run             # log decisions, never actually switch
@@ -665,12 +666,13 @@ Defaults live in settings.json in the backup root; flags override them.
     )
     parser.add_argument(
         "--strategy",
-        choices=("best", "consume-first"),
+        choices=("best", "consume-first", "priority"),
         default=None,
         help=(
-            "Target selection: 'best' (most quota left; default) or "
+            "Target selection: 'best' (most quota left; default), "
             "'consume-first' (proactively use the account whose weekly window "
-            "resets soonest)"
+            "resets soonest), or 'priority' (walk --priority-accounts in "
+            "rank order, recalling to a higher-ranked account once it recovers)"
         ),
     )
     parser.add_argument(
@@ -682,6 +684,17 @@ Defaults live in settings.json in the backup root; flags override them.
             "OAuth candidate is at or over the limit on whichever window "
             "binds first (5h, 7d, or a --model weekly window), instead of "
             "sitting blocked until the earliest reset"
+        ),
+    )
+    parser.add_argument(
+        "--priority-accounts",
+        metavar="LIST",
+        help=(
+            "Comma-separated, rank-ordered NUM|EMAIL|ALIAS list read when "
+            "--strategy priority is set. The engine switches to the "
+            "highest-ranked entry that is below --threshold, even while the "
+            "active account is itself still healthy; the last entry is "
+            "always accepted regardless of its usage"
         ),
     )
     parser.add_argument(

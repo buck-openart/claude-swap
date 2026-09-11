@@ -51,7 +51,12 @@ from claude_swap.poll_policy import (
     RESET_SLACK_S,
     binding_pct,
 )
-from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
+from claude_swap.settings import (
+    AutoSwitchSettings,
+    atomic_write_json,
+    parse_model_names,
+    parse_priority_accounts,
+)
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
 
@@ -362,7 +367,7 @@ class PollEvent(AutoSwitchEvent):
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
-    trigger: str  # "proactive" | "at-limit" | "failover" | "consume-first" | "fallback"
+    trigger: str  # "proactive" | "at-limit" | "failover" | "consume-first" | "fallback" | "priority"
     from_ref: dict | None
     to_ref: dict | None
     warnings: list[str] = field(default_factory=list)
@@ -688,6 +693,8 @@ class AutoSwitchEngine:
         # model check this needs no usage data (it's a static identifier
         # lookup), so it resolves on the very first tick.
         self._fallback_check_done = not settings.fallback_account
+        # Same shape, for ``autoswitch.priorityAccounts``.
+        self._priority_check_done = not settings.priority_accounts
 
     # -- state file ---------------------------------------------------------
 
@@ -965,6 +972,8 @@ class AutoSwitchEngine:
             self._check_model_names(quarantined, usage)
         if not self._fallback_check_done:
             self._check_fallback_account()
+        if not self._priority_check_done:
+            self._check_priority_accounts()
 
         if (
             self.switcher.account_kind_for(current) == "api_key"
@@ -979,11 +988,29 @@ class AutoSwitchEngine:
             return TickOutcome.NO_ACTION
 
         active_headroom = headroom.get(current)
+        # Priority recall is decided BEFORE the below-threshold early exit
+        # below, since its whole point is to act even while the active
+        # account is itself healthy. Gated on the same cooldown the
+        # proactive/consume-first triggers already respect, checked here
+        # rather than added to their shared gate further down, so a
+        # cooldown tick still falls through to that gate's ordinary
+        # below-threshold NO_ACTION instead of a bespoke one.
+        priority_target = None
+        if (
+            active_headroom is not None
+            and settings.strategy == "priority"
+            and not self._in_cooldown(state)
+        ):
+            priority_target = self._priority_target(
+                current, headroom, quarantined, self._resolve_priority_accounts()
+            )
         if active_headroom is not None:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
             utilization = 100.0 - active_headroom
-            if utilization < settings.threshold:
+            if priority_target is not None:
+                trigger = "priority"
+            elif utilization < settings.threshold:
                 if settings.strategy != "consume-first":
                     self._emit(
                         NoSwitchEvent(
@@ -1180,17 +1207,26 @@ class AutoSwitchEngine:
             return ranked
 
         decided_now = self.clock()
-        ordered, any_known, active_reset_ts = _rank(
-            trigger=trigger,
-            consume_first=consume_first,
-            oauth_candidates=oauth_candidates,
-            usage=usage,
-            headroom=headroom,
-            current=current,
-            active_headroom=active_headroom,
-            settings=settings,
-            now=decided_now,
-        )
+        if trigger == "priority":
+            # Already fully decided above: exactly one candidate, chosen by
+            # rank rather than headroom, so the headroom/hysteresis-based
+            # `_rank_candidates` (and its no-return bar, which exists to
+            # stop a flap back to an account "no better than when we left
+            # it" — the opposite of what a fixed rank order asks for) does
+            # not apply here.
+            ordered, any_known, active_reset_ts = [priority_target], True, None
+        else:
+            ordered, any_known, active_reset_ts = _rank(
+                trigger=trigger,
+                consume_first=consume_first,
+                oauth_candidates=oauth_candidates,
+                usage=usage,
+                headroom=headroom,
+                current=current,
+                active_headroom=active_headroom,
+                settings=settings,
+                now=decided_now,
+            )
 
         if trigger == "consume-first" and ordered:
             # Two-phase commit: the provisional pick may have ridden a
@@ -1242,7 +1278,7 @@ class AutoSwitchEngine:
                 # for real, not go on a cached, possibly-stale reading.
                 trigger in ("at-limit", "failover")
                 and fallback_num in candidates
-                and self._fallback_is_eligible(fallback_num)
+                and self._oauth_switch_eligible(fallback_num)
             )
             if not any_known and not fallback_ready:
                 # No candidate readable this tick — true for every strategy,
@@ -2306,11 +2342,12 @@ class AutoSwitchEngine:
         )
         return TickOutcome.BLOCKED
 
-    def _fallback_is_eligible(self, num: str | None) -> bool:
-        """Whether a resolved ``fallbackAccount`` slot can actually be used.
+    def _oauth_switch_eligible(self, num: str | None) -> bool:
+        """Whether a resolved ``fallbackAccount``/``priorityAccounts`` slot
+        can actually be landed on outside the normal candidate ranking.
 
-        One definition for both the decision point and the typo guard, so
-        the warning cannot claim a fallback the engine would refuse.
+        One definition for both the decision point and each setting's typo
+        guard, so a warning can never claim a slot the engine would refuse.
 
         An API-key slot is never eligible, in EITHER setting of
         ``includeApiKeyAccounts``, because neither setting can honour the
@@ -2354,7 +2391,7 @@ class AutoSwitchEngine:
         candidate list would otherwise look like a safety net while being
         inert.
 
-        Resolution alone is not the bar, so this asks ``_fallback_is_eligible``
+        Resolution alone is not the bar, so this asks ``_oauth_switch_eligible``
         the same question the decision point asks. ``_resolve_account_identifier``
         returns a bare digit unexamined, so ``--fallback-account 4`` with three
         accounts resolves to ``"4"`` — the typo most worth catching, and one
@@ -2378,7 +2415,7 @@ class AutoSwitchEngine:
                 )
             )
             return
-        if self._fallback_is_eligible(resolved):
+        if self._oauth_switch_eligible(resolved):
             return
         self._emit(
             ConfigWarningEvent(
@@ -2390,6 +2427,101 @@ class AutoSwitchEngine:
                 )
             )
         )
+
+    def _resolve_priority_accounts(self) -> list[str]:
+        """Resolve ``autoswitch.priorityAccounts`` to account numbers, in
+        rank order.
+
+        Re-resolved every tick like ``_resolve_fallback_account_number``
+        (a cheap, in-memory lookup) rather than cached, so an account added,
+        removed, or renamed mid-run is picked up immediately. An identifier
+        that fails to resolve, or resolves to a slot ``_oauth_switch_eligible``
+        refuses, is dropped rather than breaking the rank order for the
+        entries after it; a later duplicate of an already-seen account is
+        dropped too, since a repeated rank has no meaning.
+        """
+        seen: set[str] = set()
+        resolved: list[str] = []
+        for identifier in parse_priority_accounts(self.settings.priority_accounts):
+            try:
+                num = self.switcher._resolve_account_identifier(identifier)
+            except ConfigError:
+                continue
+            if num is None or num in seen or not self._oauth_switch_eligible(num):
+                continue
+            seen.add(num)
+            resolved.append(num)
+        return resolved
+
+    def _priority_target(
+        self,
+        current: str,
+        headroom: dict[str, float | None],
+        quarantined: set[str],
+        priority_numbers: list[str],
+    ) -> str | None:
+        """First ready account ranked above ``current`` in ``priority_numbers``.
+
+        ``current``'s own rank is its index in the list, or
+        ``len(priority_numbers)`` (lowest possible) when it isn't listed at
+        all — so any listed, ready account always outranks an unlisted one.
+        Every non-terminal entry must read below ``settings.threshold``; the
+        LAST entry is uncapped, mirroring ``fallbackAccount``'s "the freshen
+        step judges it live" contract, so a short list still has somewhere
+        to land even when its usage hasn't been read yet this tick. A
+        quarantined higher-priority entry is skipped rather than treated as
+        a rank boundary, so a dead #1 can't hide a healthy #2.
+        """
+        current_rank = (
+            priority_numbers.index(current)
+            if current in priority_numbers
+            else len(priority_numbers)
+        )
+        last_index = len(priority_numbers) - 1
+        for rank, num in enumerate(priority_numbers):
+            if rank >= current_rank:
+                break
+            if num in quarantined:
+                continue
+            if rank == last_index:
+                return num
+            h = headroom.get(num)
+            if h is not None and (100.0 - h) < self.settings.threshold:
+                return num
+        return None
+
+    def _check_priority_accounts(self) -> None:
+        """One-shot ``autoswitch.priorityAccounts`` typo guard, mirroring
+        ``_check_fallback_account``: an identifier that never resolves would
+        otherwise silently never participate in recall, with nothing telling
+        the user their list is shorter than they think."""
+        self._priority_check_done = True
+        raw = parse_priority_accounts(self.settings.priority_accounts)
+        if not raw:
+            return
+        seen: set[str] = set()
+        bad = []
+        for identifier in raw:
+            try:
+                num = self.switcher._resolve_account_identifier(identifier)
+            except ConfigError:
+                num = None
+            if num is None or not self._oauth_switch_eligible(num):
+                bad.append(identifier)
+            elif num in seen:
+                bad.append(f"{identifier} (duplicate)")
+            else:
+                seen.add(num)
+        if bad:
+            self._emit(
+                ConfigWarningEvent(
+                    message=(
+                        "autoswitch.priorityAccounts: "
+                        f"{', '.join(bad)} did not resolve to a usable "
+                        "account and will be skipped (typo?)"
+                    )
+                )
+            )
 
     def _earliest_recovery(
         self, usage: dict[str, dict | str | None]

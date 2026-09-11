@@ -984,6 +984,138 @@ class TestFallbackAccount:
         assert h.active_number() == 1
 
 
+class TestPriorityAccounts:
+    """`autoswitch.strategy=priority` + `priorityAccounts` recalls to a
+    higher-ranked account once it recovers, even while the active
+    (lower-ranked) account is itself still healthy."""
+
+    def _seed(self, temp_home: Path, **kw) -> EngineHarness:
+        kw.setdefault("strategy", "priority")
+        h = EngineHarness(temp_home, **kw)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.seed(3, "c@example.com")
+        h.make_live("a@example.com", 1)
+        return h
+
+    def test_recalls_to_higher_priority_while_active_still_healthy(
+        self, temp_home
+    ):
+        # The reported real-world bug: account 1 (rank 1, "max") is at 63%
+        # used — comfortably below threshold, so `best` would never move —
+        # but account 2 (rank 0, "enterprise") has recovered, and priority
+        # order says give it back regardless.
+        h = self._seed(temp_home, priority_accounts="2,1")
+        outcome = h.tick_with_usage({
+            "1": _usage(63), "2": _usage(50), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        switch = next(e for e in h.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "priority"
+
+    def test_no_recall_when_higher_priority_still_above_threshold(
+        self, temp_home
+    ):
+        h = self._seed(temp_home, priority_accounts="2,1")
+        outcome = h.tick_with_usage({
+            "1": _usage(50), "2": _usage(95), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
+    def test_terminal_entry_is_uncapped(self, temp_home):
+        # Account 3 is last in the list, so it qualifies even at 100% used —
+        # the same "freshen step judges it live" contract as fallbackAccount.
+        h = self._seed(temp_home, priority_accounts="2,3")
+        outcome = h.tick_with_usage({
+            "1": _usage(50), "2": _usage(95), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_unlisted_current_is_outranked_by_any_listed_entry(self, temp_home):
+        # Account 1 (active, unlisted) is itself healthy at 50% used, but an
+        # unlisted current ranks below every listed entry, so it still
+        # yields to account 2 the moment account 2 qualifies.
+        h = self._seed(temp_home, priority_accounts="2,3")
+        outcome = h.tick_with_usage({
+            "1": _usage(50), "2": _usage(50), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_quarantined_higher_priority_entry_is_skipped(self, temp_home):
+        h = self._seed(temp_home, priority_accounts="2,3,1")
+        h.engine._quarantine("2", "b@example.com", "invalid_grant")
+        h.events.clear()
+        outcome = h.tick_with_usage({
+            "1": _usage(50), "2": _usage(50), "3": _usage(50),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_cooldown_suppresses_recall(self, temp_home):
+        h = self._seed(temp_home, priority_accounts="2,1")
+        h.engine._mutate_state(
+            lambda s: s.update(lastSwitchAt=h.clock() - 10)
+        )
+        outcome = h.tick_with_usage({
+            "1": _usage(63), "2": _usage(50), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
+    def test_priority_accounts_inert_without_priority_strategy(self, temp_home):
+        # Unchanged behavior: priorityAccounts is only read when strategy is
+        # explicitly "priority" — setting it alone must not perturb `best`.
+        h = self._seed(
+            temp_home, strategy="best", priority_accounts="2,1"
+        )
+        outcome = h.tick_with_usage({
+            "1": _usage(63), "2": _usage(50), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
+    def test_unresolvable_priority_account_warns_once_and_skips_it(
+        self, temp_home
+    ):
+        h = self._seed(
+            temp_home, priority_accounts="nonexistent@example.com,2"
+        )
+        usage = {"1": _usage(63), "2": _usage(50), "3": _usage(100)}
+        outcome = h.tick_with_usage(usage)
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        warnings = [e for e in h.events if isinstance(e, ConfigWarningEvent)]
+        assert len(warnings) == 1
+        assert "nonexistent@example.com" in warnings[0].message
+        h.tick_with_usage(usage)
+        warnings = [e for e in h.events if isinstance(e, ConfigWarningEvent)]
+        assert len(warnings) == 1  # once per run, not per tick
+
+    def test_duplicate_priority_account_warns(self, temp_home):
+        # A literal repeated identifier is deduped by `parse_priority_accounts`
+        # before resolution ever runs, so the "(duplicate)" branch needs two
+        # DIFFERENT identifiers that resolve to the SAME account instead.
+        h = self._seed(temp_home)
+        h.switcher.set_alias("2", "enterprise")
+        h.settings = replace(
+            h.settings, priority_accounts="2,enterprise"
+        )
+        h.engine = h._make_engine()
+        h.tick_with_usage({"1": _usage(63), "2": _usage(50), "3": _usage(100)})
+        warnings = [e for e in h.events if isinstance(e, ConfigWarningEvent)]
+        assert len(warnings) == 1
+        assert "duplicate" in warnings[0].message
+
+    def test_valid_priority_accounts_never_warns(self, temp_home):
+        h = self._seed(temp_home, priority_accounts="2,1")
+        h.tick_with_usage({"1": _usage(63), "2": _usage(50), "3": _usage(100)})
+        assert not any(isinstance(e, ConfigWarningEvent) for e in h.events)
+
+
 class TestIdleHold:
     """Active token expired while Claude Code owns it → hold, don't fail over."""
 

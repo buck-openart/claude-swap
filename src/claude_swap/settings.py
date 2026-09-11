@@ -47,7 +47,9 @@ class AutoSwitchSettings:
     interval_seconds: float = 60.0
     cooldown_seconds: float = 300.0
     hysteresis_pct: float = 10.0
-    strategy: str = "best"  # "best" (most headroom) or "consume-first" (soonest weekly reset)
+    # "best" (most headroom), "consume-first" (soonest weekly reset), or
+    # "priority" (walk priority_accounts in rank order; see that field).
+    strategy: str = "best"
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
     # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus"),
@@ -63,6 +65,15 @@ class AutoSwitchSettings:
     # rather than sitting blocked until the earliest reset. Never an API-key
     # account. None = no fallback (default: block).
     fallback_account: str | None = None
+    # Comma-separated, rank-ordered NUM|EMAIL|ALIAS list read only when
+    # strategy is "priority". The engine recalls to the highest-ranked entry
+    # that is ready — utilization below `threshold` — even while the active
+    # account is itself still healthy, so a higher-priority account is
+    # resumed as soon as it recovers rather than waiting for the active one
+    # to degrade. The LAST entry is uncapped (always ready), the same
+    # "judged live, not by a stale reading" contract as fallback_account.
+    # None = no list configured (priority strategy then behaves like best).
+    priority_accounts: str | None = None
 
 
 @dataclass(frozen=True)
@@ -126,7 +137,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "strategy", "strategy", "choice",
-            choices=("best", "consume-first"),
+            choices=("best", "consume-first", "priority"),
             help="How auto-switch picks the target account",
         ),
         SettingSpec(
@@ -144,6 +155,10 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "fallbackAccount", "fallback_account", "string",
             help="NUM|EMAIL|ALIAS to force onto once every OAuth account is spent",
+        ),
+        SettingSpec(
+            "autoswitch", "priorityAccounts", "priority_accounts", "string",
+            help="Rank-ordered NUM|EMAIL|ALIAS list for strategy=priority",
         ),
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),
@@ -175,6 +190,26 @@ def parse_model_names(value: str | None) -> tuple[str, ...]:
         if name and name.lower() not in seen:
             seen[name.lower()] = name
     return tuple(seen.values())
+
+
+def parse_priority_accounts(value: str | None) -> tuple[str, ...]:
+    """Split a comma-separated, rank-ordered account list, trimmed and
+    deduped by exact match (first occurrence wins — order is the whole
+    point, so a later duplicate has no rank of its own). Unlike
+    ``parse_model_names`` this does not lowercase-fold: identifiers are
+    account numbers, aliases, or emails, and folding a number or alias would
+    be pointless while folding an email could merge two case-distinct
+    aliases that only differ from an unrelated account by case."""
+    if not value:
+        return ()
+    seen: set[str] = set()
+    result = []
+    for part in value.split(","):
+        identifier = part.strip()
+        if identifier and identifier not in seen:
+            seen.add(identifier)
+            result.append(identifier)
+    return tuple(result)
 
 
 def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
@@ -442,6 +477,7 @@ def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
         ("model", "model"),
         ("strategy", "strategy"),
         ("fallback_account", "fallback_account"),
+        ("priority_accounts", "priority_accounts"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
