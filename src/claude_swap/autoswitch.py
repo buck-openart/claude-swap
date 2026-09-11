@@ -990,19 +990,28 @@ class AutoSwitchEngine:
         active_headroom = headroom.get(current)
         # Priority recall is decided BEFORE the below-threshold early exit
         # below, since its whole point is to act even while the active
-        # account is itself healthy. Gated on the same cooldown the
-        # proactive/consume-first triggers already respect, checked here
-        # rather than added to their shared gate further down, so a
-        # cooldown tick still falls through to that gate's ordinary
-        # below-threshold NO_ACTION instead of a bespoke one.
+        # account is itself healthy — and SCOPED to exactly that case, like
+        # every sibling anti-flap gate. Unscoped it also pre-empted
+        # `at-limit`/`failover`, where narrowing the candidates to one
+        # rank-chosen account stranded an exhausted active for good if that
+        # account could not be freshened: the ordinary ranking and the
+        # fallback escape both became unreachable. Gated on the same
+        # cooldown the proactive/consume-first triggers already respect,
+        # checked here rather than in their shared gate below, so a cooldown
+        # tick still falls through to that gate's ordinary NO_ACTION.
         priority_target = None
         if (
             active_headroom is not None
+            and (100.0 - active_headroom) < settings.threshold
             and settings.strategy == "priority"
             and not self._in_cooldown(state)
         ):
             priority_target = self._priority_target(
-                current, headroom, quarantined, self._resolve_priority_accounts()
+                current,
+                headroom,
+                quarantined,
+                self._resolve_priority_accounts(),
+                settings,
             )
         if active_headroom is not None:
             self._unhealthy_ticks = 0
@@ -1454,11 +1463,33 @@ class AutoSwitchEngine:
                 # cause, and the fast retry that would shorten it is what
                 # 770d2a6 removed.
                 return self._block_all_exhausted(usage)
+            if trigger == "priority":
+                # See the same arm below the next branch for why a failed
+                # recall is NO_ACTION rather than ERROR.
+                return TickOutcome.NO_ACTION
             return TickOutcome.ERROR
         if trigger == "fallback":
             # Nothing systemic and nothing transient, so the loop drained on
             # a quarantine or `skip-live-session`.
             return self._block_all_exhausted(usage)
+        if trigger == "priority":
+            # The active account is healthy by construction here — recall is
+            # scoped to below-threshold — so a recall that could not land is
+            # a tick that did nothing. `best` in this same fleet state
+            # returns NO_ACTION without ever entering the loop, and the
+            # exit-code contract has to hold across strategies: cron
+            # wrappers keying on BLOCKED(3) or ERROR(1) must not be paged by
+            # a healthy fleet because a strategy flag is set.
+            self._emit(
+                NoSwitchEvent(
+                    reason="priority-target-unreachable",
+                    detail=(
+                        "the higher-ranked account could not be freshened "
+                        "this tick; staying put"
+                    ),
+                )
+            )
+            return TickOutcome.NO_ACTION
         self._emit(NoSwitchEvent(reason="no-viable-target"))
         return TickOutcome.BLOCKED
 
@@ -2205,7 +2236,11 @@ class AutoSwitchEngine:
         # state lock.
         with self._state_lock():
             state = self._read_state()
-            if trigger in ("proactive", "consume-first") and self._in_cooldown(state):
+            if trigger in (
+                "proactive",
+                "consume-first",
+                "priority",
+            ) and self._in_cooldown(state):
                 self._emit(NoSwitchEvent(reason="cooldown"))
                 return TickOutcome.NO_ACTION
 
@@ -2459,34 +2494,39 @@ class AutoSwitchEngine:
         headroom: dict[str, float | None],
         quarantined: set[str],
         priority_numbers: list[str],
+        settings: AutoSwitchSettings,
     ) -> str | None:
         """First ready account ranked above ``current`` in ``priority_numbers``.
 
         ``current``'s own rank is its index in the list, or
         ``len(priority_numbers)`` (lowest possible) when it isn't listed at
         all — so any listed, ready account always outranks an unlisted one.
-        Every non-terminal entry must read below ``settings.threshold``; the
-        LAST entry is uncapped, mirroring ``fallbackAccount``'s "the freshen
-        step judges it live" contract, so a short list still has somewhere
-        to land even when its usage hasn't been read yet this tick. A
-        quarantined higher-priority entry is skipped rather than treated as
-        a rank boundary, so a dead #1 can't hide a healthy #2.
+
+        EVERY entry must read below ``settings.threshold``, the last one
+        included. An uncapped tail was tried and reverted: recall departs a
+        HEALTHY account, so landing on one whose usage is unread or known
+        spent buys an immediate ``at-limit`` bounce back off it, and the
+        pair then flaps forever at cooldown cadence — measured
+        ``[3, 1, 3, 1, ...]`` for a list of ``2,3`` with 3 at 100%. That is
+        the opposite of ``fallbackAccount``'s uncapped designation, which
+        fires only once every other candidate is spent and there is nowhere
+        better by construction.
+
+        A quarantined higher-priority entry is skipped rather than treated
+        as a rank boundary, so a dead #1 can't hide a healthy #2.
         """
         current_rank = (
             priority_numbers.index(current)
             if current in priority_numbers
             else len(priority_numbers)
         )
-        last_index = len(priority_numbers) - 1
         for rank, num in enumerate(priority_numbers):
             if rank >= current_rank:
                 break
             if num in quarantined:
                 continue
-            if rank == last_index:
-                return num
             h = headroom.get(num)
-            if h is not None and (100.0 - h) < self.settings.threshold:
+            if h is not None and (100.0 - h) < settings.threshold:
                 return num
         return None
 

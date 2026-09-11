@@ -1024,15 +1024,102 @@ class TestPriorityAccounts:
         assert outcome is TickOutcome.NO_ACTION
         assert h.active_number() == 1
 
-    def test_terminal_entry_is_uncapped(self, temp_home):
-        # Account 3 is last in the list, so it qualifies even at 100% used —
-        # the same "freshen step judges it live" contract as fallbackAccount.
+    def test_terminal_entry_is_capped_like_every_other(self, temp_home):
+        # The last entry was once uncapped, on the theory that the freshen
+        # step would judge it live. It judges the credential, never the
+        # quota — so recall left a healthy account for a spent one.
         h = self._seed(temp_home, priority_accounts="2,3")
         outcome = h.tick_with_usage({
             "1": _usage(50), "2": _usage(95), "3": _usage(100),
         })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
+    def test_spent_terminal_entry_does_not_flap(self, temp_home):
+        # The regression the cap closes. Uncapped, this walked
+        # [3, 1, 3, 1, ...] forever: recall onto 3, `at-limit` straight back
+        # off it, repeating every cooldown for the life of the window.
+        h = self._seed(temp_home, priority_accounts="2,3")
+        usage = {"1": _usage(50), "2": _usage(95), "3": _usage(100)}
+        for _ in range(10):
+            assert h.tick_with_usage(usage) is TickOutcome.NO_ACTION
+            h.clock.advance(h.settings.cooldown_seconds + 1)
+        assert h.active_number() == 1
+
+    def test_no_recall_onto_an_account_whose_usage_is_unreadable(
+        self, temp_home
+    ):
+        # Unknown headroom is not below-threshold. Recall departs a HEALTHY
+        # account, so "might be fine" is not good enough to move on.
+        h = self._seed(temp_home, priority_accounts="2,1")
+        outcome = h.tick_with_usage({
+            "1": _usage(50), "2": None, "3": _usage(100),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
+    def test_exhausted_active_still_gets_the_ordinary_ranking(self, temp_home):
+        # Recall is scoped to a below-threshold active, so `at-limit` keeps
+        # the full ranked candidate list. Narrowing it to the one
+        # rank-chosen account stranded an exhausted active for good when
+        # that account could not be freshened — `skip-live-session` never
+        # self-heals, and the fallbackAccount escape became unreachable too.
+        h = self._seed(temp_home, priority_accounts="2,1")
+        attempted: list[str] = []
+
+        def freshen(number, _email):
+            attempted.append(number)
+            return "skip-live-session" if number == "2" else "ok"
+
+        with patch.object(h.engine, "_freshen_target", side_effect=freshen):
+            outcome = h.tick_with_usage({
+                "1": _usage(100), "2": _usage(10), "3": _usage(20),
+            })
         assert outcome is TickOutcome.SWITCHED
+        assert attempted == ["2", "3"]
         assert h.active_number() == 3
+
+    def test_unreachable_recall_target_is_no_action_not_blocked(
+        self, temp_home
+    ):
+        # The active account is healthy by construction, so a recall that
+        # could not land is a tick that did nothing. `best` returns
+        # NO_ACTION(2) in this same fleet state, and cron wrappers keying on
+        # BLOCKED(3) must not be paged because a strategy flag is set.
+        h = self._seed(temp_home, priority_accounts="2,1")
+        with patch.object(
+            h.engine, "_freshen_target", return_value="skip-live-session"
+        ):
+            outcome = h.tick_with_usage({
+                "1": _usage(50), "2": _usage(10), "3": _usage(100),
+            })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        assert "priority-target-unreachable" in [
+            e.reason for e in h.events if isinstance(e, NoSwitchEvent)
+        ]
+
+    def test_cooldown_is_rechecked_under_the_state_lock(self, temp_home):
+        # A competing engine can claim the switch between the recall site's
+        # cooldown check and `_perform`'s. The in-lock recheck is what stops
+        # this engine from immediately superseding it.
+        h = self._seed(temp_home, priority_accounts="2,1")
+
+        def race(_number, _email):
+            h.engine._mutate_state(
+                lambda state: state.update(lastSwitchAt=h.clock())
+            )
+            return "ok"
+
+        with patch.object(h.engine, "_freshen_target", side_effect=race):
+            outcome = h.tick_with_usage({
+                "1": _usage(63), "2": _usage(50), "3": _usage(100),
+            })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        assert "cooldown" in [
+            e.reason for e in h.events if isinstance(e, NoSwitchEvent)
+        ]
 
     def test_unlisted_current_is_outranked_by_any_listed_entry(self, temp_home):
         # Account 1 (active, unlisted) is itself healthy at 50% used, but an
