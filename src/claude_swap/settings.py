@@ -67,12 +67,13 @@ class AutoSwitchSettings:
     fallback_account: str | None = None
     # Comma-separated, rank-ordered NUM|EMAIL|ALIAS list acted on only when
     # strategy is "priority" (the typo guard validates it under any
-    # strategy). The engine recalls to the highest-ranked entry
-    # that is ready — utilization below `threshold` — even while the active
-    # account is itself still healthy, so a higher-priority account is
-    # resumed as soon as it recovers rather than waiting for the active one
-    # to degrade. EVERY entry is capped, the last one included: recall
-    # departs a healthy account, so landing on a spent one just bounces.
+    # strategy). Recall takes the highest-ranked entry below `threshold`
+    # even while the active account is itself still healthy — but only
+    # while the ACTIVE account is below `threshold` too, and every entry is
+    # capped by it, the last one included. `_priority_target` in
+    # autoswitch.py is the canonical account of why both caps exist; this
+    # comment stating the mechanism a fourth time is what let an earlier
+    # copy of it drift out of date.
     # None = no list configured (priority strategy then behaves like best).
     priority_accounts: str | None = None
 

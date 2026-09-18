@@ -1181,9 +1181,97 @@ class TestPriorityAccounts:
         assert outcome is TickOutcome.NO_ACTION
         assert h.active_number() == 1
 
+    def test_a_mixed_case_email_entry_still_resolves(self, temp_home):
+        # `parse_priority_accounts` must not lowercase-fold, and this is the
+        # test its docstring names: `_resolve_account_identifier` matches
+        # emails case-sensitively, so folding would turn a correctly spelled
+        # address into one that resolves to nothing — and report it to the
+        # user as an unknown identifier. `parse_model_names` sits next to it
+        # and DOES fold, so the two look harmonizable until this goes red.
+        h = EngineHarness(
+            temp_home,
+            strategy="priority",
+            priority_accounts="B@Example.COM,1",
+        )
+        h.seed(1, "a@example.com")
+        h.seed(2, "B@Example.COM")
+        h.seed(3, "c@example.com")
+        h.make_live("a@example.com", 1)
+        outcome = h.tick_with_usage({
+            "1": _usage(63), "2": _usage(50), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        assert not [e for e in h.events if isinstance(e, ConfigWarningEvent)]
+
+    def test_a_disabled_priority_entry_is_dropped_from_the_rank_order(
+        self, temp_home
+    ):
+        # Eligibility is checked at the DECISION site, not just in the typo
+        # guard: `cswap disable` holds a slot out of automatic rotation, and
+        # a rank order must not be a way back in. The guard already warns
+        # that the entry was dropped — the engine has to actually drop it,
+        # or the warning is a lie about what just happened.
+        h = self._seed(temp_home, priority_accounts="2,3")
+        data = h.switcher._get_sequence_data()
+        data["accounts"]["2"]["disabled"] = True
+        h.switcher._write_json(h.switcher.sequence_file, data)
+        outcome = h.tick_with_usage({
+            "1": _usage(63), "2": _usage(10), "3": _usage(50),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_cooldown_does_not_even_reach_the_recall_target(self, temp_home):
+        # The gate's cooldown conjunct is not redundant with `_perform`'s
+        # in-lock recheck: without it the engine freshens a credential it
+        # then refuses to switch to, once per tick for the whole window,
+        # and reports the tick as `below-threshold` rather than `cooldown`.
+        h = self._seed(temp_home, priority_accounts="2,1")
+        h.engine._mutate_state(
+            lambda s: s.update(lastSwitchAt=h.clock() - 10)
+        )
+        with patch.object(h.engine, "_freshen_target") as freshen:
+            outcome = h.tick_with_usage({
+                "1": _usage(63), "2": _usage(50), "3": _usage(100),
+            })
+        assert outcome is TickOutcome.NO_ACTION
+        assert freshen.call_count == 0
+        assert "below-threshold" in [
+            e.reason for e in h.events if isinstance(e, NoSwitchEvent)
+        ]
+
+    def test_an_active_exactly_at_the_threshold_is_not_below_it(
+        self, temp_home
+    ):
+        # Strict `<` at the gate. At exactly the threshold the tick belongs
+        # to the ordinary proactive ranking, which takes the headroom winner
+        # 2 — not rank-0's 3.
+        h = self._seed(temp_home, priority_accounts="3,1")
+        outcome = h.tick_with_usage({
+            "1": _usage(90), "2": _usage(10), "3": _usage(60),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_a_candidate_exactly_at_the_threshold_is_not_a_recall_target(
+        self, temp_home
+    ):
+        # Strict `<` at the other site, in `_priority_target`. One point
+        # short of the flap `test_spent_terminal_entry_does_not_flap` pins:
+        # recall departs a healthy account, so a target that is not itself
+        # below the threshold is not worth departing for.
+        h = self._seed(temp_home, priority_accounts="2,1")
+        outcome = h.tick_with_usage({
+            "1": _usage(50), "2": _usage(90), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
     def test_priority_accounts_inert_without_priority_strategy(self, temp_home):
-        # Unchanged behavior: priorityAccounts is only read when strategy is
-        # explicitly "priority" — setting it alone must not perturb `best`.
+        # Unchanged behavior: the rank order is acted on only when strategy
+        # is explicitly "priority" — setting the list alone must not perturb
+        # `best`. (The typo guard still validates it under any strategy.)
         h = self._seed(
             temp_home, strategy="best", priority_accounts="2,1"
         )
@@ -1268,9 +1356,16 @@ class TestPriorityAccounts:
         # an address that is spelled correctly.
         h = self._seed(temp_home, priority_accounts="b@example.com,2")
         h.seed(4, "b@example.com")  # a second slot on the same address
-        h.tick_with_usage({
+        outcome = h.tick_with_usage({
             "1": _usage(63), "2": _usage(50), "3": _usage(100), "4": _usage(50),
         })
+        # The entry is DROPPED, not fatal, and the rest of the rank order
+        # still runs. `tick` never raises, so a ConfigError leaking out of
+        # `_resolve_priority_accounts` would silently become ERROR(1) on a
+        # fleet that is entirely healthy — every tick, for as long as the
+        # collision stands.
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
         warnings = [e for e in h.events if isinstance(e, ConfigWarningEvent)]
         assert len(warnings) == 1
         assert "ambiguous" in warnings[0].message
