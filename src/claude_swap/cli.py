@@ -691,10 +691,11 @@ Defaults live in settings.json in the backup root; flags override them.
         metavar="LIST",
         help=(
             "Comma-separated, rank-ordered NUM|EMAIL|ALIAS list read when "
-            "--strategy priority is set. The engine switches to the "
+            "--strategy priority is set. The engine recalls to the "
             "highest-ranked entry that is below --threshold, even while the "
-            "active account is itself still healthy; the last entry is "
-            "always accepted regardless of its usage"
+            "active account is itself still healthy — but only while the "
+            "active account IS healthy: once it is at the limit, the "
+            "ordinary ranking and --fallback-account take over"
         ),
     )
     parser.add_argument(

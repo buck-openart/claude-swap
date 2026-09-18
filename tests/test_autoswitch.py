@@ -1202,6 +1202,51 @@ class TestPriorityAccounts:
         h.tick_with_usage({"1": _usage(63), "2": _usage(50), "3": _usage(100)})
         assert not any(isinstance(e, ConfigWarningEvent) for e in h.events)
 
+    def test_priority_strategy_with_no_list_warns(self, temp_home):
+        # Nothing is ranked, so recall can never fire and the strategy is a
+        # silent no-op — the one combination with no identifier to name.
+        h = self._seed(temp_home)
+        outcome = h.tick_with_usage({
+            "1": _usage(63), "2": _usage(50), "3": _usage(100),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        warnings = [e for e in h.events if isinstance(e, ConfigWarningEvent)]
+        assert len(warnings) == 1
+        assert "behaves exactly like 'best'" in warnings[0].message
+
+    def test_api_key_priority_entry_is_refused_and_named(self, temp_home):
+        # `_oauth_switch_eligible` refuses a metered slot in EITHER setting
+        # of includeApiKeyAccounts, so the warning has to say so rather than
+        # claim the identifier did not resolve — it resolved fine.
+        h = self._seed(temp_home, priority_accounts="2,3")
+        data = h.switcher._get_sequence_data()
+        data["accounts"]["2"]["kind"] = "api_key"
+        h.switcher._write_json(h.switcher.sequence_file, data)
+        outcome = h.tick_with_usage({
+            "1": _usage(63), "2": "api key", "3": _usage(50),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+        warnings = [e for e in h.events if isinstance(e, ConfigWarningEvent)]
+        assert len(warnings) == 1
+        assert "API-key" in warnings[0].message
+
+    def test_ambiguous_priority_email_surfaces_the_resolver_error(
+        self, temp_home
+    ):
+        # `_resolve_account_identifier` raises rather than returning None
+        # when one email matches two slots. Swallowing that reported it as
+        # an unknown identifier, which sends the user looking for a typo in
+        # an address that is spelled correctly.
+        h = self._seed(temp_home, priority_accounts="b@example.com,2")
+        h.seed(4, "b@example.com")  # a second slot on the same address
+        h.tick_with_usage({
+            "1": _usage(63), "2": _usage(50), "3": _usage(100), "4": _usage(50),
+        })
+        warnings = [e for e in h.events if isinstance(e, ConfigWarningEvent)]
+        assert len(warnings) == 1
+        assert "ambiguous" in warnings[0].message
+
 
 class TestIdleHold:
     """Active token expired while Claude Code owns it → hold, don't fail over."""

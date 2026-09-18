@@ -694,7 +694,11 @@ class AutoSwitchEngine:
         # lookup), so it resolves on the very first tick.
         self._fallback_check_done = not settings.fallback_account
         # Same shape, for ``autoswitch.priorityAccounts``.
-        self._priority_check_done = not settings.priority_accounts
+        # Also armed with an EMPTY list when the strategy is `priority`:
+        # that combination is a silent no-op the guard has to name.
+        self._priority_check_done = not (
+            settings.priority_accounts or settings.strategy == "priority"
+        )
 
     # -- state file ---------------------------------------------------------
 
@@ -2090,7 +2094,9 @@ class AutoSwitchEngine:
         snapshot and, only when a switch would fire, re-runs an escalated
         collection and re-verifies the choice in ``_tick_inner`` (two-phase
         commit), plus a per-target ``UsageEntry.fresh`` gate before
-        performing.
+        performing. Priority recall also fires outside the band and decides
+        on the stored snapshot; it is bounded instead by ``at-limit``
+        bouncing off a target that turned out to be spent, on the next tick.
 
         Stalest-first needs no rotation cursor: it reads the persisted store,
         so the loop and cron-driven ``--once`` runs schedule identically.
@@ -2392,13 +2398,14 @@ class AutoSwitchEngine:
           one-way door — the next tick's ``active-api-key`` early return
           holds, so rotation never resumes even once the OAuth accounts
           reset;
-        * with it on, the last-resort leg above already takes
-          ``api_key_candidates`` before this branch is reached, and it takes
-          them in rotation order — so the engine can land on a DIFFERENT
-          metered account than the one named here, and the bill follows.
+        * with it on, ``api_key_candidates`` are already reachable through
+          the ordinary ranking, in rotation order — so naming one here buys
+          no control over WHICH metered account gets the traffic, and the
+          bill follows whichever one the engine lands on.
 
-        Refusing both ways means the warning tells the truth in both, rather
-        than implying a control over billing that does not exist.
+        Refusing both ways means each setting's warning tells the truth in
+        both, rather than implying a control over billing that does not
+        exist.
         """
         if num is None:
             return False
@@ -2532,33 +2539,69 @@ class AutoSwitchEngine:
 
     def _check_priority_accounts(self) -> None:
         """One-shot ``autoswitch.priorityAccounts`` typo guard, mirroring
-        ``_check_fallback_account``: an identifier that never resolves would
-        otherwise silently never participate in recall, with nothing telling
-        the user their list is shorter than they think."""
+        ``_check_fallback_account``.
+
+        Each cause gets its own sentence because, unlike the fallback
+        guard's single slot, the remedies differ: an ineligible or ambiguous
+        identifier needs correcting, a duplicate is simply inert, and an
+        empty list under ``strategy=priority`` means the strategy itself
+        never does anything. One wording covering all four would be false
+        for three of them.
+        """
         self._priority_check_done = True
         raw = parse_priority_accounts(self.settings.priority_accounts)
         if not raw:
+            if self.settings.strategy == "priority":
+                self._emit(
+                    ConfigWarningEvent(
+                        message=(
+                            "autoswitch.strategy is 'priority' but "
+                            "priorityAccounts is empty — nothing is ranked, "
+                            "so recall never fires and the engine behaves "
+                            "exactly like 'best'"
+                        )
+                    )
+                )
             return
         seen: set[str] = set()
-        bad = []
+        unusable: list[str] = []
+        duplicates: list[str] = []
         for identifier in raw:
             try:
                 num = self.switcher._resolve_account_identifier(identifier)
-            except ConfigError:
-                num = None
-            if num is None or not self._oauth_switch_eligible(num):
-                bad.append(identifier)
+            except ConfigError as e:
+                self._emit(
+                    ConfigWarningEvent(
+                        message=f"autoswitch.priorityAccounts: {e}",
+                    )
+                )
+                continue
+            if not self._oauth_switch_eligible(num):
+                unusable.append(identifier)
             elif num in seen:
-                bad.append(f"{identifier} (duplicate)")
+                duplicates.append(identifier)
             else:
                 seen.add(num)
-        if bad:
+        if unusable:
             self._emit(
                 ConfigWarningEvent(
                     message=(
                         "autoswitch.priorityAccounts: "
-                        f"{', '.join(bad)} did not resolve to a usable "
-                        "account and will be skipped (typo?)"
+                        f"{', '.join(unusable)} cannot be recalled to "
+                        "(unknown identifier, or a slot that is disabled, "
+                        "has no usable backup, or is an API-key account) — "
+                        "dropped from the rank order"
+                    )
+                )
+            )
+        if duplicates:
+            self._emit(
+                ConfigWarningEvent(
+                    message=(
+                        "autoswitch.priorityAccounts: "
+                        f"{', '.join(duplicates)} duplicate an account "
+                        "already ranked higher in the list — a repeated rank "
+                        "has no meaning, so the later entry is dropped"
                     )
                 )
             )

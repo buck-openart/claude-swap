@@ -70,8 +70,8 @@ class AutoSwitchSettings:
     # that is ready — utilization below `threshold` — even while the active
     # account is itself still healthy, so a higher-priority account is
     # resumed as soon as it recovers rather than waiting for the active one
-    # to degrade. The LAST entry is uncapped (always ready), the same
-    # "judged live, not by a stale reading" contract as fallback_account.
+    # to degrade. EVERY entry is capped, the last one included: recall
+    # departs a healthy account, so landing on a spent one just bounces.
     # None = no list configured (priority strategy then behaves like best).
     priority_accounts: str | None = None
 
@@ -196,10 +196,10 @@ def parse_priority_accounts(value: str | None) -> tuple[str, ...]:
     """Split a comma-separated, rank-ordered account list, trimmed and
     deduped by exact match (first occurrence wins — order is the whole
     point, so a later duplicate has no rank of its own). Unlike
-    ``parse_model_names`` this does not lowercase-fold: identifiers are
-    account numbers, aliases, or emails, and folding a number or alias would
-    be pointless while folding an email could merge two case-distinct
-    aliases that only differ from an unrelated account by case."""
+    ``parse_model_names`` this does not lowercase-fold, because the
+    resolver's email match is case-sensitive: folding here would turn a
+    correctly-cased address into one that resolves to nothing. Aliases are
+    unaffected either way — ``_find_account_by_alias`` folds them itself."""
     if not value:
         return ()
     seen: set[str] = set()
