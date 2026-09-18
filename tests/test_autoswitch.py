@@ -1182,12 +1182,12 @@ class TestPriorityAccounts:
         assert h.active_number() == 1
 
     def test_a_mixed_case_email_entry_still_resolves(self, temp_home):
-        # `parse_priority_accounts` must not lowercase-fold, and its
-        # docstring names this test: `_resolve_account_identifier` matches
-        # emails case-sensitively, so folding would turn a correctly spelled
-        # address into one that resolves to nothing — and report it to the
-        # user as an unknown identifier. `parse_model_names` sits next to it
-        # and DOES fold, so the two look harmonizable until this goes red.
+        # `parse_priority_accounts` must emit each identifier with its
+        # input casing intact, and its docstring names this test:
+        # `_resolve_account_identifier` matches emails case-sensitively, so
+        # lowercasing one would turn a correctly spelled address into an
+        # identifier that resolves to nothing — and report it to the user
+        # as unknown. Folding the emitted value reddens this test alone.
         h = EngineHarness(
             temp_home,
             strategy="priority",

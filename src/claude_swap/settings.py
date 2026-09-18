@@ -195,10 +195,10 @@ def parse_model_names(value: str | None) -> tuple[str, ...]:
 def parse_priority_accounts(value: str | None) -> tuple[str, ...]:
     """Split a comma-separated, rank-ordered account list, trimmed and
     deduped by exact match (first occurrence wins — order is the whole
-    point, so a later duplicate has no rank of its own). Unlike
-    ``parse_model_names`` this does not lowercase-fold, because the
-    resolver's email match is case-sensitive: folding here would turn a
-    correctly-cased address into one that resolves to nothing; pinned by
+    point, so a later duplicate has no rank of its own). Each identifier
+    is emitted with its input casing intact, because the resolver's email
+    match is case-sensitive: lowercasing one would turn a correctly spelled
+    address into an identifier that resolves to nothing; pinned by
     ``test_a_mixed_case_email_entry_still_resolves``. Aliases are
     unaffected either way — ``_find_account_by_alias`` folds them itself."""
     if not value:
