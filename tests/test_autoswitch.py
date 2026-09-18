@@ -1182,8 +1182,8 @@ class TestPriorityAccounts:
         assert h.active_number() == 1
 
     def test_a_mixed_case_email_entry_still_resolves(self, temp_home):
-        # `parse_priority_accounts` must not lowercase-fold, and this is the
-        # test its docstring names: `_resolve_account_identifier` matches
+        # `parse_priority_accounts` must not lowercase-fold, and its
+        # docstring names this test: `_resolve_account_identifier` matches
         # emails case-sensitively, so folding would turn a correctly spelled
         # address into one that resolves to nothing — and report it to the
         # user as an unknown identifier. `parse_model_names` sits next to it
@@ -1225,8 +1225,10 @@ class TestPriorityAccounts:
     def test_cooldown_does_not_even_reach_the_recall_target(self, temp_home):
         # The gate's cooldown conjunct is not redundant with `_perform`'s
         # in-lock recheck: without it the engine freshens a credential it
-        # then refuses to switch to, once per tick for the whole window,
-        # and reports the tick as `below-threshold` rather than `cooldown`.
+        # then refuses to switch to, once per tick for the whole window.
+        # The recheck still declines, so the outcome is identical either
+        # way — only the wasted refresh and the reason distinguish them,
+        # which is why both are asserted.
         h = self._seed(temp_home, priority_accounts="2,1")
         h.engine._mutate_state(
             lambda s: s.update(lastSwitchAt=h.clock() - 10)
@@ -1257,10 +1259,10 @@ class TestPriorityAccounts:
     def test_a_candidate_exactly_at_the_threshold_is_not_a_recall_target(
         self, temp_home
     ):
-        # Strict `<` at the other site, in `_priority_target`. One point
-        # short of the flap `test_spent_terminal_entry_does_not_flap` pins:
-        # recall departs a healthy account, so a target that is not itself
-        # below the threshold is not worth departing for.
+        # Strict `<` at the other site, in `_priority_target`. Same family
+        # as the flap `test_spent_terminal_entry_does_not_flap` pins, at the
+        # boundary rather than past it: recall departs a healthy account, so
+        # a target not itself below the threshold is not worth departing for.
         h = self._seed(temp_home, priority_accounts="2,1")
         outcome = h.tick_with_usage({
             "1": _usage(50), "2": _usage(90), "3": _usage(100),

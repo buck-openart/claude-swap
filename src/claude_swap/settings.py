@@ -70,10 +70,8 @@ class AutoSwitchSettings:
     # strategy). Recall takes the highest-ranked entry below `threshold`
     # even while the active account is itself still healthy — but only
     # while the ACTIVE account is below `threshold` too, and every entry is
-    # capped by it, the last one included. `_priority_target` in
-    # autoswitch.py is the canonical account of why both caps exist; this
-    # comment stating the mechanism a fourth time is what let an earlier
-    # copy of it drift out of date.
+    # capped by it, the last one included. Why: `_priority_target` for the
+    # per-entry cap, the gate comment in `tick()` for the active-side one.
     # None = no list configured (priority strategy then behaves like best).
     priority_accounts: str | None = None
 
@@ -200,7 +198,8 @@ def parse_priority_accounts(value: str | None) -> tuple[str, ...]:
     point, so a later duplicate has no rank of its own). Unlike
     ``parse_model_names`` this does not lowercase-fold, because the
     resolver's email match is case-sensitive: folding here would turn a
-    correctly-cased address into one that resolves to nothing. Aliases are
+    correctly-cased address into one that resolves to nothing; pinned by
+    ``test_a_mixed_case_email_entry_still_resolves``. Aliases are
     unaffected either way — ``_find_account_by_alias`` folds them itself."""
     if not value:
         return ()
