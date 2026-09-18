@@ -1024,6 +1024,21 @@ class TestPriorityAccounts:
         assert outcome is TickOutcome.NO_ACTION
         assert h.active_number() == 1
 
+    def test_rank_decides_the_recall_target_not_headroom(self, temp_home):
+        # The strategy's headline promise, and the one thing no other test
+        # here pinned: every sibling case happens to make the rank-preferred
+        # account the headroom winner too, so all of them stayed green with
+        # the recall bypass deleted. Account 2 is unlisted and has far more
+        # headroom than the rank-0 entry; rank still wins. Without the
+        # bypass `_rank_candidates` runs with trigger="priority", which is
+        # outside its proactive gate, and lands on 2 by headroom alone.
+        h = self._seed(temp_home, priority_accounts="3,1")
+        outcome = h.tick_with_usage({
+            "1": _usage(63), "2": _usage(10), "3": _usage(60),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
     def test_terminal_entry_is_capped_like_every_other(self, temp_home):
         # The last entry was once uncapped, on the theory that the freshen
         # step would judge it live. It judges the credential, never the

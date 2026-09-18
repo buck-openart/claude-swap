@@ -690,12 +690,14 @@ Defaults live in settings.json in the backup root; flags override them.
         "--priority-accounts",
         metavar="LIST",
         help=(
-            "Comma-separated, rank-ordered NUM|EMAIL|ALIAS list read when "
-            "--strategy priority is set. The engine recalls to the "
-            "highest-ranked entry that is below --threshold, even while the "
-            "active account is itself still healthy — but only while the "
-            "ACTIVE account is below --threshold too. At or above it the "
-            "ordinary headroom ranking decides, rank order included"
+            "Comma-separated, rank-ordered NUM|EMAIL|ALIAS list acted on "
+            "when --strategy priority is set (it is validated under any "
+            "strategy). The engine recalls to the highest-ranked entry that "
+            "is below --threshold, even while the active account is itself "
+            "still healthy — but only while the ACTIVE account is below "
+            "--threshold too. At or above it the ordinary headroom ranking "
+            "decides and the rank order is ignored, listed accounts "
+            "competing as ordinary candidates"
         ),
     )
     parser.add_argument(
