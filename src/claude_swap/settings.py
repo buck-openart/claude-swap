@@ -65,8 +65,9 @@ class AutoSwitchSettings:
     # rather than sitting blocked until the earliest reset. Never an API-key
     # account. None = no fallback (default: block).
     fallback_account: str | None = None
-    # Comma-separated, rank-ordered NUM|EMAIL|ALIAS list read only when
-    # strategy is "priority". The engine recalls to the highest-ranked entry
+    # Comma-separated, rank-ordered NUM|EMAIL|ALIAS list acted on only when
+    # strategy is "priority" (the typo guard validates it under any
+    # strategy). The engine recalls to the highest-ranked entry
     # that is ready — utilization below `threshold` — even while the active
     # account is itself still healthy, so a higher-priority account is
     # resumed as soon as it recovers rather than waiting for the active one

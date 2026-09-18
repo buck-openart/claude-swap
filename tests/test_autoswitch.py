@@ -1099,6 +1099,19 @@ class TestPriorityAccounts:
             e.reason for e in h.events if isinstance(e, NoSwitchEvent)
         ]
 
+    def test_transient_freshen_failure_is_no_action_too(self, temp_home):
+        # The sibling of the drained-loop arm above: a network wobble while
+        # freshening the recall target reaches the systemic/transient tail
+        # instead, and it carries the same exit-code contract — ERROR(1)
+        # would page a cron wrapper for a fleet that is entirely healthy.
+        h = self._seed(temp_home, priority_accounts="2,1")
+        with patch.object(h.engine, "_freshen_target", return_value="transient"):
+            outcome = h.tick_with_usage({
+                "1": _usage(63), "2": _usage(10), "3": _usage(100),
+            })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
     def test_cooldown_is_rechecked_under_the_state_lock(self, temp_home):
         # A competing engine can claim the switch between the recall site's
         # cooldown check and `_perform`'s. The in-lock recheck is what stops

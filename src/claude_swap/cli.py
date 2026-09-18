@@ -694,8 +694,8 @@ Defaults live in settings.json in the backup root; flags override them.
             "--strategy priority is set. The engine recalls to the "
             "highest-ranked entry that is below --threshold, even while the "
             "active account is itself still healthy — but only while the "
-            "active account IS healthy: once it is at the limit, the "
-            "ordinary ranking and --fallback-account take over"
+            "ACTIVE account is below --threshold too. At or above it the "
+            "ordinary headroom ranking decides, rank order included"
         ),
     )
     parser.add_argument(

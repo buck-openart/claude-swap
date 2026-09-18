@@ -2513,11 +2513,8 @@ class AutoSwitchEngine:
         included. An uncapped tail was tried and reverted: recall departs a
         HEALTHY account, so landing on one whose usage is unread or known
         spent buys an immediate ``at-limit`` bounce back off it, and the
-        pair then flaps forever at cooldown cadence — measured
-        ``[3, 1, 3, 1, ...]`` for a list of ``2,3`` with 3 at 100%. That is
-        the opposite of ``fallbackAccount``'s uncapped designation, which
-        fires only once every other candidate is spent and there is nowhere
-        better by construction.
+        pair then flaps forever at cooldown cadence — pinned by
+        ``test_spent_terminal_entry_does_not_flap``.
 
         A quarantined higher-priority entry is skipped rather than treated
         as a rank boundary, so a dead #1 can't hide a healthy #2.
