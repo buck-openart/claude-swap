@@ -630,6 +630,24 @@ class TestFallbackAccount:
         assert switch.trigger == "fallback"
         assert not any(isinstance(e, AllExhaustedEvent) for e in h.events)
 
+    def test_switches_to_fallback_when_fleet_over_threshold_not_literally_zero(
+        self, temp_home
+    ):
+        # Real headroom left on every account (not literal 100%/0-headroom
+        # exhaustion) but all of them over the switch threshold — the
+        # "everyone's struggling" case the fallback account exists for.
+        # Regression for the gap where `fallback_ready` required literal
+        # `trigger == "at-limit"`, which never happens while any headroom
+        # remains, so a fallback sat inert through this exact case.
+        h = self._seed(temp_home, fallback_account="2")
+        outcome = h.tick_with_usage({
+            "1": _usage(97), "2": _usage(95), "3": _usage(96),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        switch = next(e for e in h.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "fallback"
+
     def test_resolves_fallback_by_email(self, temp_home):
         h = self._seed(temp_home, fallback_account="c@example.com")
         outcome = h.tick_with_usage({

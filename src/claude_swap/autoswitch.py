@@ -1280,16 +1280,46 @@ class AutoSwitchEngine:
 
         if not ordered:
             fallback_num = self._resolve_fallback_account_number()
+            # Proactive escape hatch: every OTHER OAuth candidate is known
+            # and over threshold (real headroom left, not literal exhaustion)
+            # AND the fallback itself is known to hold no less headroom than
+            # the active account right now — otherwise this would spend the
+            # active's remaining, known-good quota to land on a destination
+            # that is merely unread (may turn out fine, may not) or provably
+            # worse. Unlike the at-limit/failover escape below, an unreadable
+            # fallback does NOT get excused here: there the active is already
+            # dead, so any bet beats none; here it still has quota, so the
+            # bet needs a real, comparable reading first. Without this, a
+            # configured fallback sits inert through the exact "everyone's
+            # struggling, nobody literally at zero" case it exists for, only
+            # ever engaging once the active account hits literal zero.
+            other_headrooms = [
+                headroom.get(n) for n in oauth_candidates if n != fallback_num
+            ]
+            fallback_headroom = headroom.get(fallback_num)
+            fleet_struggling = (
+                trigger == "proactive"
+                and active_headroom is not None
+                and (100.0 - active_headroom) >= settings.threshold
+                and bool(other_headrooms)
+                and all(
+                    h is not None and (100.0 - h) >= settings.threshold
+                    for h in other_headrooms
+                )
+                and fallback_headroom is not None
+                and fallback_headroom >= active_headroom
+            )
             fallback_ready = (
-                # The active account must be unable to carry on either:
-                # at-limit means it is out of quota, failover that its
-                # credential is dead. Resolved up front so an unreadable
-                # OTHER candidate can never hide this escape hatch behind
-                # "no candidate has readable usage" below — the fallback
-                # account's OWN unreadability doesn't disqualify it either,
-                # since the freshen step a few lines down is about to try it
-                # for real, not go on a cached, possibly-stale reading.
-                trigger in ("at-limit", "failover")
+                # The active account must be unable to carry on: at-limit
+                # (out of quota), failover (credential dead), or — proactive
+                # — the fleet-struggling case just above. Resolved up front
+                # so an unreadable OTHER candidate can never hide this escape
+                # hatch behind "no candidate has readable usage" below — the
+                # fallback account's OWN unreadability doesn't disqualify it
+                # from the at-limit/failover branch either, since the
+                # freshen step a few lines down is about to try it for real,
+                # not go on a cached, possibly-stale reading.
+                (trigger in ("at-limit", "failover") or fleet_struggling)
                 and fallback_num in candidates
                 and self._oauth_switch_eligible(fallback_num)
             )
@@ -1353,7 +1383,11 @@ class AutoSwitchEngine:
                 for n in oauth_candidates
                 if not (fallback_ready and n == fallback_num)
             ]
-            truly_exhausted = all(
+            # `fleet_struggling` covers the proactive case (real headroom,
+            # all of it over threshold); the literal `<= 0` check still
+            # covers at-limit/failover, where a candidate can be over
+            # threshold without yet being fully spent.
+            truly_exhausted = fleet_struggling or all(
                 h is not None and h <= 0 for h in candidate_headrooms
             )
             if not truly_exhausted:
