@@ -652,13 +652,13 @@ class TestFallbackAccount:
         self, temp_home
     ):
         # fallback_account resolves to the already-active account: real
-        # headroom left everywhere (fleet_struggling is True) but there is
-        # nothing to switch to (fallback_ready is False). Regression for a
-        # gap where `truly_exhausted` counted fleet_struggling alone, so a
-        # struggling fleet with an unusable fallback reported AllExhaustedEvent
-        # and its long-nap cadence — worse than having no fallback configured
-        # at all for the same fleet state (see test_no_fallback_configured_
-        # still_blocks, whose usage here is deliberately identical).
+        # headroom left everywhere, all of it over threshold (fleet_struggling
+        # is True), but there is nothing to switch to (fallback_ready is
+        # False). Regression for a gap where `truly_exhausted` counted
+        # fleet_struggling alone, so a struggling fleet with an unusable
+        # fallback reported AllExhaustedEvent and its long-nap cadence,
+        # instead of the plain no-qualifying-candidate block at normal
+        # cadence a fleet in this state should get.
         h = self._seed(temp_home, fallback_account="1")
         outcome = h.tick_with_usage({
             "1": _usage(97), "2": _usage(95), "3": _usage(96),
