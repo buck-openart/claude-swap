@@ -648,6 +648,52 @@ class TestFallbackAccount:
         switch = next(e for e in h.events if isinstance(e, SwitchEvent))
         assert switch.trigger == "fallback"
 
+    def test_fleet_struggling_with_unusable_fallback_uses_normal_cadence(
+        self, temp_home
+    ):
+        # fallback_account resolves to the already-active account: real
+        # headroom left everywhere (fleet_struggling is True) but there is
+        # nothing to switch to (fallback_ready is False). Regression for a
+        # gap where `truly_exhausted` counted fleet_struggling alone, so a
+        # struggling fleet with an unusable fallback reported AllExhaustedEvent
+        # and its long-nap cadence — worse than having no fallback configured
+        # at all for the same fleet state (see test_no_fallback_configured_
+        # still_blocks, whose usage here is deliberately identical).
+        h = self._seed(temp_home, fallback_account="1")
+        outcome = h.tick_with_usage({
+            "1": _usage(97), "2": _usage(95), "3": _usage(96),
+        })
+        assert outcome is TickOutcome.BLOCKED
+        assert not any(isinstance(e, AllExhaustedEvent) for e in h.events)
+
+    def test_unread_peer_does_not_count_as_struggling(self, temp_home):
+        # A peer whose usage is unreadable this tick must not be treated as
+        # "over threshold" by fleet_struggling — an unknown reading is not
+        # evidence the fleet is struggling, and counting it as such would
+        # force a switch onto the fallback before the peer's real headroom
+        # is ever known.
+        h = self._seed(temp_home, fallback_account="2")
+        outcome = h.tick_with_usage({"1": _usage(97), "2": _usage(95), "3": None})
+        assert outcome is not TickOutcome.SWITCHED
+
+    def test_switches_to_fallback_on_a_two_account_fleet(self, temp_home):
+        # A fleet of just the active account and its fallback — no third
+        # OAuth candidate. Regression for a gap where fleet_struggling
+        # required a non-empty `other_headrooms`, making this exact
+        # two-account shape (the one the README calls the common case)
+        # unreachable: `all()` over an empty list is vacuously True, so
+        # there being no OTHER candidate to fail the check must not itself
+        # disqualify the escape hatch.
+        h = EngineHarness(temp_home, fallback_account="2")
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+        outcome = h.tick_with_usage({"1": _usage(97), "2": _usage(95)})
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        switch = next(e for e in h.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "fallback"
+
     def test_resolves_fallback_by_email(self, temp_home):
         h = self._seed(temp_home, fallback_account="c@example.com")
         outcome = h.tick_with_usage({

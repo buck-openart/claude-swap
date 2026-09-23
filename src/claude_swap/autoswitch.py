@@ -1280,19 +1280,16 @@ class AutoSwitchEngine:
 
         if not ordered:
             fallback_num = self._resolve_fallback_account_number()
-            # Proactive escape hatch: every OTHER OAuth candidate is known
-            # and over threshold (real headroom left, not literal exhaustion)
-            # AND the fallback itself is known to hold no less headroom than
-            # the active account right now — otherwise this would spend the
-            # active's remaining, known-good quota to land on a destination
-            # that is merely unread (may turn out fine, may not) or provably
-            # worse. Unlike the at-limit/failover escape below, an unreadable
-            # fallback does NOT get excused here: there the active is already
-            # dead, so any bet beats none; here it still has quota, so the
-            # bet needs a real, comparable reading first. Without this, a
-            # configured fallback sits inert through the exact "everyone's
-            # struggling, nobody literally at zero" case it exists for, only
-            # ever engaging once the active account hits literal zero.
+            # Proactive escape hatch: every other OAuth candidate is known and
+            # over threshold (real headroom left, not literal exhaustion),
+            # and the fallback itself holds no less headroom than the active
+            # account right now — otherwise this would spend known-good
+            # active quota on a destination that is merely unread or
+            # provably worse. Unlike the at-limit/failover escape below, an
+            # unreadable fallback is not excused here: the bet needs a real,
+            # comparable reading first. Without this, a configured fallback
+            # sits inert through the exact "everyone struggling, nobody
+            # literally at zero" case it exists for.
             other_headrooms = [
                 headroom.get(n) for n in oauth_candidates if n != fallback_num
             ]
@@ -1301,7 +1298,12 @@ class AutoSwitchEngine:
                 trigger == "proactive"
                 and active_headroom is not None
                 and (100.0 - active_headroom) >= settings.threshold
-                and bool(other_headrooms)
+                # `all()` over an empty list is vacuously True: on a fleet
+                # of just the active account and its fallback, there are no
+                # other candidates to fail this check, so it must not gate
+                # on `other_headrooms` being non-empty — that would make the
+                # hatch unreachable on exactly the two-account fleet the
+                # README calls the common case.
                 and all(
                     h is not None and (100.0 - h) >= settings.threshold
                     for h in other_headrooms
@@ -1363,9 +1365,11 @@ class AutoSwitchEngine:
                     )
                 )
                 return TickOutcome.NO_ACTION
-            # "All exhausted" (and its bounded reset-aware sleep) only when it's
-            # literally true: every OTHER candidate's usage is known and at
-            # its limit. A candidate that merely failed the proactive
+            # "All exhausted" (and its bounded reset-aware sleep) fires when
+            # every OTHER candidate's usage is known and at its limit, or
+            # when the fleet-struggling escape hatch above applies and the
+            # fallback is ready (see the comment on `truly_exhausted` below).
+            # A candidate that merely failed the proactive
             # hysteresis gate, or one whose usage is unreadable this tick,
             # can become viable at any moment — and the active account can
             # hit 100% and need the at-limit escape — so those keep the
@@ -1384,10 +1388,14 @@ class AutoSwitchEngine:
                 if not (fallback_ready and n == fallback_num)
             ]
             # `fleet_struggling` covers the proactive case (real headroom,
-            # all of it over threshold); the literal `<= 0` check still
+            # all of it over threshold), but only once a usable fallback is
+            # confirmed — gated on `fallback_ready` so a struggling fleet
+            # whose resolved fallback turns out quarantined, ineligible, or
+            # the active account itself doesn't get called "exhausted" on a
+            # bet nobody can actually place. The literal `<= 0` check still
             # covers at-limit/failover, where a candidate can be over
             # threshold without yet being fully spent.
-            truly_exhausted = fleet_struggling or all(
+            truly_exhausted = (fleet_struggling and fallback_ready) or all(
                 h is not None and h <= 0 for h in candidate_headrooms
             )
             if not truly_exhausted:
